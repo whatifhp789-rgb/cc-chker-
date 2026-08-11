@@ -21,7 +21,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN', '8827608169:AAE2NVInl52DgRkA7_bKw2ZZRUUy_pJhB
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=100)
 
 # Owner IDs (list)
-OWNER_IDS = [8754004223]
+OWNER_IDS = [8754004223,8664074279]
 
 # Thread-safe storage
 users_data = {}
