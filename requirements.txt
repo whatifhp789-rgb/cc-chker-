@@ -2,5 +2,4 @@ requests
 pyTelegramBotAPI
 user_agent
 beautifulsoup4
-autoshopify
 requests_toolbelt
