@@ -21,10 +21,23 @@ BOT_TOKEN = os.getenv('BOT_TOKEN', '8827608169:AAE2NVInl52DgRkA7_bKw2ZZRUUy_pJhB
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=100)
 OWNER_IDS = [8754004223, 8664074279]
 
+# ==================== WELCOME TEXT SYSTEM ====================
+welcome_text = """👋 Welcome to the UL Checker Bot!
+
+❌ You are not a subscriber, but you can still check cards for FREE in our group!
+
+✅ **Features in Group:**
+• Free single card checking
+• Free multi-card checking (up to 15 cards)
+• Instant results
+
+⬇️ Click the button below to join and start checking:"""
+welcome_text_lock = threading.Lock()
+
 # ==================== PROXY SYSTEM ====================
-user_proxies = {}  # user_id -> list of proxies
+user_proxies = {}
 proxy_lock = threading.Lock()
-current_proxy_index = {}  # user_id -> current proxy index for rotation
+current_proxy_index = {}
 
 # ==================== GIF/VIDEO SYSTEM ====================
 approved_gif_path = None
@@ -168,17 +181,12 @@ def check_free_user_access(message):
         markup = types.InlineKeyboardMarkup(row_width=1)
         join_btn = types.InlineKeyboardButton("✅ Join Our Group", url="https://t.me/UL_CHATV2")
         markup.add(join_btn)
-        welcome_msg = """👋 Welcome to the UL Checker Bot!
-
-❌ You are not a subscriber, but you can still check cards for FREE in our group!
-
-✅ **Features in Group:**
-• Free single card checking
-• Free multi-card checking (up to 15 cards)
-• Instant results
-
-⬇️ Click the button below to join and start checking:"""
-        safe_send_message(message.chat.id, welcome_msg, reply_markup=markup)
+        
+        # ✅ Use custom welcome text
+        with welcome_text_lock:
+            msg = welcome_text
+        
+        safe_send_message(message.chat.id, msg, reply_markup=markup)
         return False
     return True
 
@@ -363,7 +371,6 @@ def stripe_api_check(cc, user_id=None):
             'error': 'User stopped check'
         }
     
-    # ✅ Get proxy for this user
     proxy_to_use = None
     if user_id:
         proxy_to_use = get_next_proxy_for_user(user_id)
@@ -386,7 +393,6 @@ def stripe_api_check(cc, user_id=None):
             
             api_url = f"https://wiardsclub.onrender.com/gateway=autostripe/key=wizard/site={site}/cc={cc}"
             
-            # ✅ Use proxy if available
             if proxy_to_use:
                 proxies = {'http': proxy_to_use, 'https': proxy_to_use}
                 response = requests.get(api_url, timeout=300, proxies=proxies)
@@ -719,7 +725,6 @@ ______________________
 <b>[ϟ] Daily Usage:</b> {get_user_today_usage(user_id)}/{daily_limit if daily_limit != float('inf') else '∞'}
 <b>[ϟ] Bot By:</b> @OG_UNDEFINED"""
                     
-                    # ✅ Send with GIF if available
                     with gif_lock:
                         if approved_gif_path and os.path.exists(approved_gif_path):
                             try:
@@ -739,7 +744,6 @@ ______________________
                             except Exception as e:
                                 print(f"Error sending approved GIF: {e}")
                     
-                    # Fallback: normal message
                     safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
                     approved_cards_list.append(fullcc)
                     with file_locks['approved']:
@@ -868,6 +872,51 @@ Checking cards in 3-card batches...
 
 # ==================== BOT COMMANDS ====================
 
+@bot.message_handler(commands=['setwelcome'])
+def set_welcome_command(message):
+    """Admin: Set custom welcome text"""
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can use this command!")
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        msg = """❌ Usage: /setwelcome <text>
+
+<b>Example:</b>
+/setwelcome Welcome to my bot! Enjoy free checking!
+
+<b>To add new lines, use:</b>
+/setwelcome Line 1
+Line 2
+Line 3
+
+<b>To reset to default:</b>
+/setwelcome default"""
+        safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
+        return
+    
+    new_text = parts[1].strip()
+    
+    with welcome_text_lock:
+        if new_text.lower() == 'default':
+            welcome_text = """👋 Welcome to the UL Checker Bot!
+
+❌ You are not a subscriber, but you can still check cards for FREE in our group!
+
+✅ **Features in Group:**
+• Free single card checking
+• Free multi-card checking (up to 15 cards)
+• Instant results
+
+⬇️ Click the button below to join and start checking:"""
+            safe_send_message(message.chat.id, "✅ Welcome text reset to default!", reply_to_message_id=message.message_id)
+        else:
+            welcome_text = new_text
+            safe_send_message(message.chat.id, f"✅ Welcome text updated!\n\n{new_text}", reply_to_message_id=message.message_id)
+
+# ==================== REST OF THE BOT COMMANDS ====================
+
 @bot.message_handler(commands=['start'])
 def start_command(message):
     if not check_free_user_access(message):
@@ -949,7 +998,6 @@ def start_command(message):
 
 <b>🤖 Bot By: @OG_UNDEFINED</b>"""
     
-    # ✅ Send welcome GIF if set
     with gif_lock:
         if welcome_gif_path and os.path.exists(welcome_gif_path):
             try:
@@ -1148,7 +1196,6 @@ def manage_sites_command(message):
         )
         return
     
-    # Send each site as separate message with delete button
     for site in current_sites:
         row = types.InlineKeyboardMarkup(row_width=2)
         row.add(
@@ -1341,7 +1388,6 @@ ______________________
 <b>[ϟ] Daily Usage:</b> {get_user_today_usage(message.from_user.id)}/{limits['daily'] if limits['daily'] != float('inf') else '∞'}
 <b>[ϟ] Bot By:</b> @OG_UNDEFINED"""
             
-            # ✅ Send with GIF if available
             with gif_lock:
                 if approved_gif_path and os.path.exists(approved_gif_path):
                     try:
@@ -2507,7 +2553,8 @@ def help_command(message):
 • /clearapproved - Clear approved cards
 • /stats - Approved cards statistics
 • /site - Manage sites with buttons
-• /setgif - Set GIF for approved/welcome"""
+• /setgif - Set GIF for approved/welcome
+• /setwelcome - Set custom welcome text"""
     else:
         msg += """
 
@@ -2536,6 +2583,10 @@ def help_command(message):
 • /listproxy - List your proxies
 • /removeproxy <proxy> - Remove proxy
 • Proxies rotate automatically per card check
+
+<b>📝 Welcome Text:</b>
+• /setwelcome <text> - Set custom welcome text (admin)
+• /setwelcome default - Reset to default
 
 <b>⚠️ Important:</b>
 • Bot supports 600+ users simultaneously
@@ -2596,6 +2647,7 @@ print(f"🔧 MULTI-USER FIXED: Multiple users can check simultaneously without c
 print(f"🌐 PROXY SYSTEM ADDED: Users can add proxies for IP rotation")
 print(f"🎬 GIF SYSTEM ADDED: Admin can set GIF for approved cards and welcome")
 print(f"📡 SITE MANAGEMENT ADDED: /site command with buttons")
+print(f"📝 WELCOME TEXT SYSTEM ADDED: Admin can change welcome text with /setwelcome")
 print(f"🔥 ALL YOUR ORIGINAL FEATURES PRESERVED 100%")
 
 bot.infinity_polling(timeout=30, long_polling_timeout=30)
