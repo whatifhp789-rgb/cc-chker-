@@ -35,9 +35,9 @@ welcome_text = """👋 Welcome to the UL Checker Bot!
 welcome_text_lock = threading.Lock()
 
 # ==================== PROXY SYSTEM ====================
-user_proxies = {}
+user_proxies = {}  # user_id -> list of proxies
 proxy_lock = threading.Lock()
-current_proxy_index = {}
+current_proxy_index = {}  # user_id -> current proxy index for rotation
 
 # ==================== GIF/VIDEO SYSTEM ====================
 approved_gif_path = None
@@ -1123,7 +1123,7 @@ def start_command(message):
     
     safe_send_message(message.chat.id, msg)
 
-# ==================== PROXY COMMANDS ====================
+# ==================== 🔥 FIXED PROXY COMMANDS ====================
 
 @bot.message_handler(commands=['addproxy'])
 def add_proxy_command(message):
@@ -1165,7 +1165,9 @@ def list_proxy_command(message):
     if not check_group_authorization(message):
         return
     
-    proxies = list_proxies_for_user(message.from_user.id)
+    user_id = message.from_user.id
+    proxies = list_proxies_for_user(user_id)
+    
     if not proxies:
         safe_send_message(
             message.chat.id,
@@ -1174,16 +1176,22 @@ def list_proxy_command(message):
         )
         return
     
-    proxy_list = "\n".join([f"{i+1}. <code>{p}</code>" for i, p in enumerate(proxies)])
+    # Create inline keyboard for each proxy with remove button
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for proxy in proxies:
+        # Shorten proxy for display
+        display_proxy = proxy[:30] + "..." if len(proxy) > 30 else proxy
+        markup.add(
+            types.InlineKeyboardButton(
+                f"❌ {display_proxy}", 
+                callback_data=f"removeproxy_{proxy}"
+            )
+        )
+    
     safe_send_message(
         message.chat.id,
-        f"""📋 <b>Your Proxies ({len(proxies)})</b>
-
-{proxy_list}
-
-<b>Commands:</b>
-• /addproxy <proxy> - Add new proxy
-• /removeproxy <proxy> - Remove proxy""",
+        f"📋 <b>Your Proxies ({len(proxies)})</b>\n\nClick ❌ to remove a proxy.",
+        reply_markup=markup,
         reply_to_message_id=message.message_id
     )
 
@@ -1198,7 +1206,7 @@ def remove_proxy_command(message):
     if len(parts) < 2:
         safe_send_message(
             message.chat.id,
-            "❌ Usage: /removeproxy <proxy>\nExample: /removeproxy http://1.2.3.4:8080",
+            "❌ Usage: /removeproxy <proxy>\nExample: /removeproxy http://1.2.3.4:8080\n\nOr use /listproxy to see and remove proxies.",
             reply_to_message_id=message.message_id
         )
         return
@@ -1206,6 +1214,51 @@ def remove_proxy_command(message):
     proxy = parts[1].strip()
     success, msg = remove_proxy_for_user(message.from_user.id, proxy)
     safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('removeproxy_'))
+def remove_proxy_callback(call):
+    """Remove proxy via inline button"""
+    user_id = call.from_user.id
+    
+    # Extract proxy from callback data
+    proxy = call.data.replace('removeproxy_', '')
+    
+    success, msg = remove_proxy_for_user(user_id, proxy)
+    
+    if success:
+        bot.answer_callback_query(call.id, "✅ Proxy removed!")
+    else:
+        bot.answer_callback_query(call.id, "❌ Failed to remove!")
+    
+    # Refresh the list
+    proxies = list_proxies_for_user(user_id)
+    
+    if not proxies:
+        safe_edit_message_text(
+            "❌ No proxies added. Use /addproxy to add one.",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
+        return
+    
+    # Rebuild the list
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for p in proxies:
+        display_proxy = p[:30] + "..." if len(p) > 30 else p
+        markup.add(
+            types.InlineKeyboardButton(
+                f"❌ {display_proxy}", 
+                callback_data=f"removeproxy_{p}"
+            )
+        )
+    
+    safe_edit_message_text(
+        f"📋 <b>Your Proxies ({len(proxies)})</b>\n\nClick ❌ to remove a proxy.",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=markup,
+        parse_mode="HTML"
+    )
 
 # ==================== SITE MANAGEMENT COMMANDS ====================
 
@@ -2682,6 +2735,7 @@ print(f"🎬 GIF/VIDEO SYSTEM ADDED: Admin can set GIF/MP4 for approved cards an
 print(f"📡 SITE MANAGEMENT ADDED: /site command with buttons")
 print(f"📝 WELCOME TEXT SYSTEM ADDED: Admin can change welcome text with /setwelcome")
 print(f"🌐 ACTIVE SITE COMMAND ADDED: Admin can change active site with /setsite")
+print(f"✅ /listproxy and /removeproxy FIXED: Now working with inline buttons")
 print(f"🔥 ALL YOUR ORIGINAL FEATURES PRESERVED 100%")
 
 bot.infinity_polling(timeout=30, long_polling_timeout=30)
