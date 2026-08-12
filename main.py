@@ -890,6 +890,7 @@ def set_welcome_command(message):
     
     new_text = parts[1].strip()
     
+    global welcome_text
     with welcome_text_lock:
         if new_text.lower() == 'default':
             welcome_text = """👋 Welcome to the UL Checker Bot!
@@ -985,18 +986,19 @@ def process_gif_upload(message):
         return
     
     if not message.document and not message.animation:
-        safe_send_message(message.chat.id, "❌ Please send a GIF file (gif or mp4)")
+        safe_send_message(message.chat.id, "❌ Please send a GIF or MP4 file")
         return
     
-    gif_type = users_data.get(str(message.from_user.id), {}).get('gif_type', 'approved')
+    gif_type = 'approved'
+    with data_lock:
+        if str(message.from_user.id) in users_data:
+            gif_type = users_data[str(message.from_user.id)].get('gif_type', 'approved')
     
     try:
         if message.document:
             file_info = bot.get_file(message.document.file_id)
-            file_extension = message.document.file_name.split('.')[-1].lower()
-            if file_extension in ['gif']:
-                file_name = f"{gif_type}_{int(time.time())}.gif"
-            else:
+            file_name = message.document.file_name
+            if '.' not in file_name:
                 file_name = f"{gif_type}_{int(time.time())}.mp4"
         else:
             file_info = bot.get_file(message.animation.file_id)
@@ -1014,8 +1016,9 @@ def process_gif_upload(message):
             set_welcome_gif(file_name)
             safe_send_message(message.chat.id, f"✅ Welcome GIF/Video set!\nFile: {file_name}")
         
-        if str(message.from_user.id) in users_data:
-            del users_data[str(message.from_user.id)]
+        with data_lock:
+            if str(message.from_user.id) in users_data:
+                del users_data[str(message.from_user.id)]
             
     except Exception as e:
         safe_send_message(message.chat.id, f"❌ Error: {str(e)}")
@@ -1303,7 +1306,7 @@ def process_add_site_admin(message):
         f"✅ Site <code>{site}</code> added successfully!\nTotal Sites: {len(stripe_sites)}"
     )
 
-# ==================== CHK, MASS, MTXT COMMANDS (Same as before) ====================
+# ==================== CHK, MASS, MTXT COMMANDS ====================
 
 @bot.message_handler(func=lambda message: message.text and 
                     (message.text.lower().startswith('.chk') or 
