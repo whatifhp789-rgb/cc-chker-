@@ -869,7 +869,7 @@ Checking cards in 3-card batches...
 
 # ==================== BOT COMMANDS ====================
 
-# ==================== 🔥 NEW COMMAND 1: SET WELCOME TEXT ====================
+# ==================== 🔥 COMMAND 1: SET WELCOME TEXT ====================
 @bot.message_handler(commands=['setwelcome'])
 def set_welcome_command(message):
     if message.from_user.id not in OWNER_IDS:
@@ -907,7 +907,7 @@ def set_welcome_command(message):
             welcome_text = new_text
             safe_send_message(message.chat.id, f"✅ Welcome text updated!\n\n{new_text}")
 
-# ==================== 🔥 NEW COMMAND 2: SET ACTIVE SITE ====================
+# ==================== 🔥 COMMAND 2: SET ACTIVE SITE ====================
 @bot.message_handler(commands=['setsite'])
 def set_site_command(message):
     if message.from_user.id not in OWNER_IDS:
@@ -940,6 +940,85 @@ def set_site_command(message):
         message.chat.id,
         f"✅ <b>Active Site Updated!</b>\n\n<b>New Active Site:</b> <code>{site}</code>\n<b>Total Sites:</b> {len(stripe_sites)}"
     )
+
+# ==================== 🔥 COMMAND 3: SET GIF ====================
+@bot.message_handler(commands=['setgif'])
+def set_gif_command(message):
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can use this command!")
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        msg = """❌ Usage: /setgif <type>
+
+<b>Types:</b>
+• approved - GIF/Video for approved cards
+• welcome - GIF/Video for welcome message
+
+<b>Example:</b>
+• /setgif approved
+• /setgif welcome
+
+<b>Then reply with GIF or MP4 file.</b>"""
+        safe_send_message(message.chat.id, msg)
+        return
+    
+    gif_type = parts[1].lower()
+    if gif_type not in ['approved', 'welcome']:
+        safe_send_message(message.chat.id, "❌ Invalid type! Use 'approved' or 'welcome'")
+        return
+    
+    with data_lock:
+        users_data[str(message.from_user.id)] = {'gif_type': gif_type}
+    
+    safe_send_message(
+        message.chat.id,
+        f"📤 Send the GIF/MP4 file for '{gif_type}' (reply to this message)",
+        reply_to_message_id=message.message_id
+    )
+    bot.register_next_step_handler(message, process_gif_upload)
+
+def process_gif_upload(message):
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can do this!")
+        return
+    
+    if not message.document and not message.animation:
+        safe_send_message(message.chat.id, "❌ Please send a GIF file (gif or mp4)")
+        return
+    
+    gif_type = users_data.get(str(message.from_user.id), {}).get('gif_type', 'approved')
+    
+    try:
+        if message.document:
+            file_info = bot.get_file(message.document.file_id)
+            file_extension = message.document.file_name.split('.')[-1].lower()
+            if file_extension in ['gif']:
+                file_name = f"{gif_type}_{int(time.time())}.gif"
+            else:
+                file_name = f"{gif_type}_{int(time.time())}.mp4"
+        else:
+            file_info = bot.get_file(message.animation.file_id)
+            file_name = f"{gif_type}_{int(time.time())}.mp4"
+        
+        downloaded = bot.download_file(file_info.file_path)
+        
+        with open(file_name, 'wb') as f:
+            f.write(downloaded)
+        
+        if gif_type == 'approved':
+            set_approved_gif(file_name)
+            safe_send_message(message.chat.id, f"✅ Approved GIF/Video set!\nFile: {file_name}")
+        else:
+            set_welcome_gif(file_name)
+            safe_send_message(message.chat.id, f"✅ Welcome GIF/Video set!\nFile: {file_name}")
+        
+        if str(message.from_user.id) in users_data:
+            del users_data[str(message.from_user.id)]
+            
+    except Exception as e:
+        safe_send_message(message.chat.id, f"❌ Error: {str(e)}")
 
 # ==================== START COMMAND ====================
 
@@ -1024,6 +1103,7 @@ def start_command(message):
 
 <b>🤖 Bot By: @OG_UNDEFINED</b>"""
     
+    # ✅ Send welcome GIF if set (with dynamic msg)
     with gif_lock:
         if welcome_gif_path and os.path.exists(welcome_gif_path):
             try:
@@ -1124,82 +1204,6 @@ def remove_proxy_command(message):
     success, msg = remove_proxy_for_user(message.from_user.id, proxy)
     safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
 
-# ==================== GIF SET COMMAND ====================
-
-@bot.message_handler(commands=['setgif'])
-def set_gif_command(message):
-    if message.from_user.id not in OWNER_IDS:
-        safe_send_message(message.chat.id, "❌ Only owner can use this command!")
-        return
-    
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        msg = """❌ Usage: /setgif <type>
-
-<b>Types:</b>
-• approved - GIF for approved cards
-• welcome - GIF for welcome message
-
-<b>Example:</b>
-• /setgif approved
-• /setgif welcome
-
-<b>Then reply with GIF file.</b>"""
-        safe_send_message(message.chat.id, msg)
-        return
-    
-    gif_type = parts[1].lower()
-    if gif_type not in ['approved', 'welcome']:
-        safe_send_message(message.chat.id, "❌ Invalid type! Use 'approved' or 'welcome'")
-        return
-    
-    with data_lock:
-        users_data[str(message.from_user.id)] = {'gif_type': gif_type}
-    
-    safe_send_message(
-        message.chat.id,
-        f"📤 Send the GIF file for '{gif_type}' (reply to this message)",
-        reply_to_message_id=message.message_id
-    )
-    bot.register_next_step_handler(message, process_gif_upload)
-
-def process_gif_upload(message):
-    if message.from_user.id not in OWNER_IDS:
-        safe_send_message(message.chat.id, "❌ Only owner can do this!")
-        return
-    
-    if not message.document and not message.animation:
-        safe_send_message(message.chat.id, "❌ Please send a GIF file (mp4 or gif)")
-        return
-    
-    gif_type = users_data.get(str(message.from_user.id), {}).get('gif_type', 'approved')
-    
-    try:
-        if message.document:
-            file_info = bot.get_file(message.document.file_id)
-            file_name = f"{gif_type}_{int(time.time())}.gif"
-        else:
-            file_info = bot.get_file(message.animation.file_id)
-            file_name = f"{gif_type}_{int(time.time())}.mp4"
-        
-        downloaded = bot.download_file(file_info.file_path)
-        
-        with open(file_name, 'wb') as f:
-            f.write(downloaded)
-        
-        if gif_type == 'approved':
-            set_approved_gif(file_name)
-            safe_send_message(message.chat.id, f"✅ Approved GIF set successfully!\nFile: {file_name}")
-        else:
-            set_welcome_gif(file_name)
-            safe_send_message(message.chat.id, f"✅ Welcome GIF set successfully!\nFile: {file_name}")
-        
-        if str(message.from_user.id) in users_data:
-            del users_data[str(message.from_user.id)]
-            
-    except Exception as e:
-        safe_send_message(message.chat.id, f"❌ Error: {str(e)}")
-
 # ==================== SITE MANAGEMENT COMMANDS ====================
 
 @bot.message_handler(commands=['site'])
@@ -1299,7 +1303,7 @@ def process_add_site_admin(message):
         f"✅ Site <code>{site}</code> added successfully!\nTotal Sites: {len(stripe_sites)}"
     )
 
-# ==================== CHK COMMAND ====================
+# ==================== CHK, MASS, MTXT COMMANDS (Same as before) ====================
 
 @bot.message_handler(func=lambda message: message.text and 
                     (message.text.lower().startswith('.chk') or 
@@ -1481,8 +1485,6 @@ ______________________
             text=f"❌ Error: {str(e)}"
         )
 
-# ==================== MASS COMMAND ====================
-
 @bot.message_handler(func=lambda message: message.text and 
                     (message.text.lower().startswith('.mass') or 
                      message.text.lower().startswith('/mass')))
@@ -1544,8 +1546,6 @@ def mass_command(message):
             unique_cards.append(card)
     safe_send_message(message.chat.id, f"🔍 Found {len(unique_cards)} cards to check...", reply_to_message_id=message.message_id)
     check_queue.put((message, unique_cards, False, 'mass'))
-
-# ==================== MTXT COMMAND ====================
 
 @bot.message_handler(func=lambda message: message.text and 
                     (message.text.lower().startswith('.mtxt') or 
@@ -2675,7 +2675,7 @@ print(f"🔒 USER ISOLATION FIXED: Each user's session is now properly isolated"
 print(f"🛑 STOP BUTTON FIXED: Now correctly identifies user")
 print(f"🔧 MULTI-USER FIXED: Multiple users can check simultaneously without conflicts")
 print(f"🌐 PROXY SYSTEM ADDED: Users can add proxies for IP rotation")
-print(f"🎬 GIF SYSTEM ADDED: Admin can set GIF for approved cards and welcome")
+print(f"🎬 GIF/VIDEO SYSTEM ADDED: Admin can set GIF/MP4 for approved cards and welcome")
 print(f"📡 SITE MANAGEMENT ADDED: /site command with buttons")
 print(f"📝 WELCOME TEXT SYSTEM ADDED: Admin can change welcome text with /setwelcome")
 print(f"🌐 ACTIVE SITE COMMAND ADDED: Admin can change active site with /setsite")
