@@ -36,9 +36,9 @@ welcome_text = """👋 Welcome to the UL Checker Bot!
 welcome_text_lock = threading.Lock()
 
 # ==================== PROXY SYSTEM ====================
-user_proxies = {}  # user_id -> list of proxies
+user_proxies = {}
 proxy_lock = threading.Lock()
-current_proxy_index = {}  # user_id -> current proxy index for rotation
+current_proxy_index = {}
 
 # ==================== GIF/VIDEO SYSTEM ====================
 approved_gif_path = None
@@ -103,21 +103,64 @@ check_queue = queue.Queue()
 processing_threads = []
 parallel_executor = ThreadPoolExecutor(max_workers=100)
 
-# ==================== 🔥 PROXY VALIDATION (ALL TYPES) ====================
-def validate_proxy(proxy):
-    """Check if proxy is working - supports HTTP, HTTPS, SOCKS4, SOCKS5"""
+# ==================== 🔥 SMART PROXY PARSER ====================
+def parse_proxy(proxy):
+    """
+    Har type ki proxy ko parse karega:
+    - ip:port:user:pass
+    - user:pass@ip:port
+    - protocol://user:pass@ip:port
+    - ip:port
+    - protocol://ip:port
+    """
     proxy = proxy.strip()
     
-    # Parse proxy to detect type
+    # Agar protocol nahi hai toh http:// add karo
+    if not re.match(r'^[a-zA-Z]+://', proxy):
+        proxy = 'http://' + proxy
+    
+    # Parse karo
     parsed = urllib.parse.urlparse(proxy)
     
-    # If no scheme, assume HTTP
-    if not parsed.scheme:
-        proxy = "http://" + proxy
-        parsed = urllib.parse.urlparse(proxy)
+    # Agar username/password nahi hai toh alag se detect karo
+    if not parsed.username:
+        # Check for format: ip:port:user:pass (with http://)
+        match = re.match(r'^http://([0-9.]+):(\d+):([^:]+):([^@]+)$', proxy)
+        if match:
+            ip, port, user, password = match.groups()
+            return f"http://{user}:{password}@{ip}:{port}"
+        
+        # Check for format: ip:port:user:pass (without http://)
+        match = re.match(r'^([0-9.]+):(\d+):([^:]+):([^@]+)$', proxy.replace('http://', ''))
+        if match:
+            ip, port, user, password = match.groups()
+            return f"http://{user}:{password}@{ip}:{port}"
+        
+        # Check for format: ip:port:user:pass (socks5)
+        match = re.match(r'^socks5://([0-9.]+):(\d+):([^:]+):([^@]+)$', proxy)
+        if match:
+            ip, port, user, password = match.groups()
+            return f"socks5://{user}:{password}@{ip}:{port}"
+    
+    # Agar parsed mein username hai toh wapas same return karo
+    if parsed.username:
+        return proxy
+    
+    # Agar sirf ip:port hai toh http:// add karo
+    match = re.match(r'^http://([0-9.]+):(\d+)$', proxy)
+    if match:
+        return proxy
+    
+    return proxy
+
+# ==================== 🔥 PROXY VALIDATION ====================
+def validate_proxy(proxy):
+    """Check if proxy is working - supports ALL formats"""
+    
+    # 🔥 SMART PARSE
+    proxy = parse_proxy(proxy)
     
     try:
-        # Test with Telegram API
         test_url = "https://api.telegram.org"
         proxies = {
             'http': proxy,
@@ -126,9 +169,8 @@ def validate_proxy(proxy):
         
         response = requests.get(test_url, proxies=proxies, timeout=15)
         
-        # Any response means proxy is working
         if response.status_code in [200, 401, 403]:
-            return True, f"✅ Proxy is working! ({parsed.scheme.upper()})"
+            return True, f"✅ Proxy is working! ({proxy[:50]}...)"
         else:
             return False, f"❌ Proxy returned status: {response.status_code}"
             
@@ -906,7 +948,7 @@ Checking cards in 3-card batches...
             if user_id in stop_flags:
                 del stop_flags[user_id]
 
-# ==================== 🔥 UPDATED PROXY COMMANDS WITH VALIDATION ====================
+# ==================== 🔥 PROXY COMMANDS (SMART PARSER) ====================
 
 @bot.message_handler(commands=['addproxy'])
 def add_proxy_command(message):
@@ -921,18 +963,18 @@ def add_proxy_command(message):
             message.chat.id,
             """❌ Usage: /addproxy <proxy>
 
-<b>Proxy Formats (ALL TYPES SUPPORTED):</b>
-• <code>http://user:pass@ip:port</code>
-• <code>https://user:pass@ip:port</code>
-• <code>socks4://user:pass@ip:port</code>
-• <code>socks5://user:pass@ip:port</code>
+<b>🔥 ANY FORMAT WORKS!</b>
+• <code>ip:port:user:pass</code>
+• <code>user:pass@ip:port</code>
+• <code>protocol://user:pass@ip:port</code>
+• <code>ip:port</code>
 • <code>http://ip:port</code>
-• <code>ip:port</code> (auto-detects HTTP)
 
-<b>Example:</b>
-• /addproxy http://admin:123@1.2.3.4:8080
+<b>Examples (SAB CHALEGA):</b>
+• /addproxy 31.59.20.176:6754:mzaeocrn:79iur73rck61
+• /addproxy mzaeocrn:79iur73rck61@31.59.20.176:6754
+• /addproxy http://mzaeocrn:79iur73rck61@31.59.20.176:6754
 • /addproxy socks5://user:pass@5.6.7.8:1080
-• /addproxy 1.2.3.4:8080
 
 <b>Commands:</b>
 • /listproxy - List all your proxies with status
@@ -941,23 +983,26 @@ def add_proxy_command(message):
         )
         return
     
-    proxy = parts[1].strip()
+    raw_proxy = parts[1].strip()
     
-    # 🔥 Show validation in progress
+    # 🔥 SMART PARSE KARO
+    proxy = parse_proxy(raw_proxy)
+    
+    # Show validation in progress
     status_msg = safe_send_message(
         message.chat.id, 
-        f"🔍 Validating proxy <code>{proxy}</code>... Please wait (max 15s)",
+        f"🔍 Validating proxy <code>{proxy[:50]}...</code>",
         reply_to_message_id=message.message_id
     )
     
-    # 🔥 Validate proxy
+    # Validate proxy
     is_valid, validation_msg = validate_proxy(proxy)
     
     if not is_valid:
         safe_edit_message_text(
             chat_id=message.chat.id,
             message_id=status_msg.message_id,
-            text=f"❌ <b>Proxy Rejected!</b>\n\n{validation_msg}\n\nProxy: <code>{proxy}</code>"
+            text=f"❌ <b>Proxy Rejected!</b>\n\n{validation_msg}\n\nOriginal: <code>{raw_proxy}</code>\nParsed: <code>{proxy}</code>"
         )
         return
     
@@ -968,13 +1013,13 @@ def add_proxy_command(message):
         safe_edit_message_text(
             chat_id=message.chat.id,
             message_id=status_msg.message_id,
-            text=f"{validation_msg}\n\n✅ Proxy added successfully!\n\nProxy: <code>{proxy}</code>"
+            text=f"{validation_msg}\n\n✅ Proxy added successfully!\n\nOriginal: <code>{raw_proxy}</code>\nParsed: <code>{proxy}</code>"
         )
     else:
         safe_edit_message_text(
             chat_id=message.chat.id,
             message_id=status_msg.message_id,
-            text=f"❌ {msg}\n\nProxy: <code>{proxy}</code>"
+            text=f"❌ {msg}\n\nOriginal: <code>{raw_proxy}</code>"
         )
 
 @bot.message_handler(commands=['listproxy'])
@@ -995,23 +1040,20 @@ def list_proxy_command(message):
         )
         return
     
-    # Check each proxy's status (quick check)
     markup = types.InlineKeyboardMarkup(row_width=1)
     status_text = f"📋 <b>Your Proxies ({len(proxies)})</b>\n\n"
     
-    # Validate each proxy (with timeout)
-    for i, proxy in enumerate(proxies, 1):
-        is_valid, _ = validate_proxy(proxy)
+    for i, p in enumerate(proxies, 1):
+        is_valid, _ = validate_proxy(p)
         status_icon = "🟢" if is_valid else "🔴"
-        
-        display_proxy = proxy[:35] + "..." if len(proxy) > 35 else proxy
+        display_proxy = p[:35] + "..." if len(p) > 35 else p
         markup.add(
             types.InlineKeyboardButton(
                 f"{status_icon} {display_proxy}", 
-                callback_data=f"removeproxy_{proxy}"
+                callback_data=f"removeproxy_{p}"
             )
         )
-        status_text += f"{i}. {status_icon} <code>{proxy}</code>\n"
+        status_text += f"{i}. {status_icon} <code>{p}</code>\n"
     
     status_text += "\n💡 Click ❌ to remove a proxy."
     
@@ -1044,10 +1086,7 @@ def remove_proxy_command(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('removeproxy_'))
 def remove_proxy_callback(call):
-    """Remove proxy via inline button"""
     user_id = call.from_user.id
-    
-    # Extract proxy from callback data
     proxy = call.data.replace('removeproxy_', '')
     
     success, msg = remove_proxy_for_user(user_id, proxy)
@@ -1057,7 +1096,6 @@ def remove_proxy_callback(call):
     else:
         bot.answer_callback_query(call.id, "❌ Failed to remove!")
     
-    # Refresh the list
     proxies = list_proxies_for_user(user_id)
     
     if not proxies:
@@ -1068,7 +1106,6 @@ def remove_proxy_callback(call):
         )
         return
     
-    # Rebuild the list with status
     markup = types.InlineKeyboardMarkup(row_width=1)
     status_text = f"📋 <b>Your Proxies ({len(proxies)})</b>\n\n"
     
@@ -1431,7 +1468,6 @@ def start_command(message):
 
 <b>🤖 Bot By: @OG_UNDEFINED</b>"""
     
-    # ✅ Send welcome GIF if set
     with gif_lock:
         if welcome_gif_path and os.path.exists(welcome_gif_path):
             try:
@@ -2755,6 +2791,7 @@ def help_command(message):
 • /listproxy - List your proxies
 • /removeproxy <proxy> - Remove proxy
 • Proxies rotate automatically per card check
+• 🔥 ANY FORMAT WORKS! (ip:port:user:pass / user:pass@ip:port / protocol://user:pass@ip:port)
 • 🔥 Only LIVE proxies are accepted!
 
 <b>📝 Welcome Text:</b>
@@ -2826,6 +2863,7 @@ print(f"📡 SITE MANAGEMENT ADDED: /site command with buttons")
 print(f"📝 WELCOME TEXT SYSTEM ADDED: Admin can change welcome text with /setwelcome")
 print(f"🌐 ACTIVE SITE COMMAND ADDED: Admin can change active site with /setsite")
 print(f"✅ /listproxy and /removeproxy FIXED: Now working with inline buttons")
+print(f"🔥 SMART PROXY PARSER ADDED: ANY format works! (ip:port:user:pass / user:pass@ip:port / protocol://user:pass@ip:port)")
 print(f"🔥 PROXY VALIDATION ADDED: Only LIVE proxies are accepted (HTTP/HTTPS/SOCKS4/SOCKS5)")
 print(f"🔥 ALL YOUR ORIGINAL FEATURES PRESERVED 100%")
 
