@@ -15,6 +15,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import multiprocessing
 from collections import defaultdict
+import urllib.parse
 
 # ==================== BOT SETUP ====================
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8827608169:AAE2NVInl52DgRkA7_bKw2ZZRUUy_pJhBec')
@@ -101,6 +102,44 @@ cooldown_lock = threading.Lock()
 check_queue = queue.Queue()
 processing_threads = []
 parallel_executor = ThreadPoolExecutor(max_workers=100)
+
+# ==================== 🔥 PROXY VALIDATION (ALL TYPES) ====================
+def validate_proxy(proxy):
+    """Check if proxy is working - supports HTTP, HTTPS, SOCKS4, SOCKS5"""
+    proxy = proxy.strip()
+    
+    # Parse proxy to detect type
+    parsed = urllib.parse.urlparse(proxy)
+    
+    # If no scheme, assume HTTP
+    if not parsed.scheme:
+        proxy = "http://" + proxy
+        parsed = urllib.parse.urlparse(proxy)
+    
+    try:
+        # Test with Telegram API
+        test_url = "https://api.telegram.org"
+        proxies = {
+            'http': proxy,
+            'https': proxy
+        }
+        
+        response = requests.get(test_url, proxies=proxies, timeout=15)
+        
+        # Any response means proxy is working
+        if response.status_code in [200, 401, 403]:
+            return True, f"✅ Proxy is working! ({parsed.scheme.upper()})"
+        else:
+            return False, f"❌ Proxy returned status: {response.status_code}"
+            
+    except requests.exceptions.ProxyError:
+        return False, "❌ Proxy connection failed (ProxyError)"
+    except requests.exceptions.ConnectTimeout:
+        return False, "❌ Proxy connection timeout"
+    except requests.exceptions.ConnectionError:
+        return False, "❌ Proxy connection error"
+    except Exception as e:
+        return False, f"❌ Proxy validation error: {str(e)[:50]}"
 
 # ==================== PROXY FUNCTIONS ====================
 def add_proxy_for_user(user_id, proxy):
@@ -867,9 +906,328 @@ Checking cards in 3-card batches...
             if user_id in stop_flags:
                 del stop_flags[user_id]
 
-# ==================== BOT COMMANDS ====================
+# ==================== 🔥 UPDATED PROXY COMMANDS WITH VALIDATION ====================
 
-# ==================== 🔥 COMMAND 1: SET WELCOME TEXT ====================
+@bot.message_handler(commands=['addproxy'])
+def add_proxy_command(message):
+    if not check_free_user_access(message):
+        return
+    if not check_group_authorization(message):
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        safe_send_message(
+            message.chat.id,
+            """❌ Usage: /addproxy <proxy>
+
+<b>Proxy Formats (ALL TYPES SUPPORTED):</b>
+• <code>http://user:pass@ip:port</code>
+• <code>https://user:pass@ip:port</code>
+• <code>socks4://user:pass@ip:port</code>
+• <code>socks5://user:pass@ip:port</code>
+• <code>http://ip:port</code>
+• <code>ip:port</code> (auto-detects HTTP)
+
+<b>Example:</b>
+• /addproxy http://admin:123@1.2.3.4:8080
+• /addproxy socks5://user:pass@5.6.7.8:1080
+• /addproxy 1.2.3.4:8080
+
+<b>Commands:</b>
+• /listproxy - List all your proxies with status
+• /removeproxy <proxy> - Remove a proxy""",
+            reply_to_message_id=message.message_id
+        )
+        return
+    
+    proxy = parts[1].strip()
+    
+    # 🔥 Show validation in progress
+    status_msg = safe_send_message(
+        message.chat.id, 
+        f"🔍 Validating proxy <code>{proxy}</code>... Please wait (max 15s)",
+        reply_to_message_id=message.message_id
+    )
+    
+    # 🔥 Validate proxy
+    is_valid, validation_msg = validate_proxy(proxy)
+    
+    if not is_valid:
+        safe_edit_message_text(
+            chat_id=message.chat.id,
+            message_id=status_msg.message_id,
+            text=f"❌ <b>Proxy Rejected!</b>\n\n{validation_msg}\n\nProxy: <code>{proxy}</code>"
+        )
+        return
+    
+    # Proxy is working, add it
+    success, msg = add_proxy_for_user(message.from_user.id, proxy)
+    
+    if success:
+        safe_edit_message_text(
+            chat_id=message.chat.id,
+            message_id=status_msg.message_id,
+            text=f"{validation_msg}\n\n✅ Proxy added successfully!\n\nProxy: <code>{proxy}</code>"
+        )
+    else:
+        safe_edit_message_text(
+            chat_id=message.chat.id,
+            message_id=status_msg.message_id,
+            text=f"❌ {msg}\n\nProxy: <code>{proxy}</code>"
+        )
+
+@bot.message_handler(commands=['listproxy'])
+def list_proxy_command(message):
+    if not check_free_user_access(message):
+        return
+    if not check_group_authorization(message):
+        return
+    
+    user_id = message.from_user.id
+    proxies = list_proxies_for_user(user_id)
+    
+    if not proxies:
+        safe_send_message(
+            message.chat.id,
+            "❌ No proxies added. Use /addproxy to add one.\n\n<b>Note:</b> Only working proxies are accepted!",
+            reply_to_message_id=message.message_id
+        )
+        return
+    
+    # Check each proxy's status (quick check)
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    status_text = f"📋 <b>Your Proxies ({len(proxies)})</b>\n\n"
+    
+    # Validate each proxy (with timeout)
+    for i, proxy in enumerate(proxies, 1):
+        is_valid, _ = validate_proxy(proxy)
+        status_icon = "🟢" if is_valid else "🔴"
+        
+        display_proxy = proxy[:35] + "..." if len(proxy) > 35 else proxy
+        markup.add(
+            types.InlineKeyboardButton(
+                f"{status_icon} {display_proxy}", 
+                callback_data=f"removeproxy_{proxy}"
+            )
+        )
+        status_text += f"{i}. {status_icon} <code>{proxy}</code>\n"
+    
+    status_text += "\n💡 Click ❌ to remove a proxy."
+    
+    safe_send_message(
+        message.chat.id,
+        status_text,
+        reply_markup=markup,
+        reply_to_message_id=message.message_id
+    )
+
+@bot.message_handler(commands=['removeproxy'])
+def remove_proxy_command(message):
+    if not check_free_user_access(message):
+        return
+    if not check_group_authorization(message):
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        safe_send_message(
+            message.chat.id,
+            "❌ Usage: /removeproxy <proxy>\nExample: /removeproxy http://1.2.3.4:8080\n\nOr use /listproxy to see and remove proxies.",
+            reply_to_message_id=message.message_id
+        )
+        return
+    
+    proxy = parts[1].strip()
+    success, msg = remove_proxy_for_user(message.from_user.id, proxy)
+    safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('removeproxy_'))
+def remove_proxy_callback(call):
+    """Remove proxy via inline button"""
+    user_id = call.from_user.id
+    
+    # Extract proxy from callback data
+    proxy = call.data.replace('removeproxy_', '')
+    
+    success, msg = remove_proxy_for_user(user_id, proxy)
+    
+    if success:
+        bot.answer_callback_query(call.id, "✅ Proxy removed!")
+    else:
+        bot.answer_callback_query(call.id, "❌ Failed to remove!")
+    
+    # Refresh the list
+    proxies = list_proxies_for_user(user_id)
+    
+    if not proxies:
+        safe_edit_message_text(
+            "❌ No proxies added. Use /addproxy to add one.",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
+        return
+    
+    # Rebuild the list with status
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    status_text = f"📋 <b>Your Proxies ({len(proxies)})</b>\n\n"
+    
+    for i, p in enumerate(proxies, 1):
+        is_valid, _ = validate_proxy(p)
+        status_icon = "🟢" if is_valid else "🔴"
+        display_proxy = p[:35] + "..." if len(p) > 35 else p
+        markup.add(
+            types.InlineKeyboardButton(
+                f"{status_icon} {display_proxy}", 
+                callback_data=f"removeproxy_{p}"
+            )
+        )
+        status_text += f"{i}. {status_icon} <code>{p}</code>\n"
+    
+    status_text += "\n💡 Click ❌ to remove a proxy."
+    
+    safe_edit_message_text(
+        status_text,
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=markup,
+        parse_mode="HTML"
+    )
+
+# ==================== SITE MANAGEMENT COMMANDS ====================
+
+@bot.message_handler(commands=['setsite'])
+def set_site_command(message):
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can use this command!")
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        msg = """❌ Usage: /setsite <site_domain>
+
+<b>Example:</b>
+/setsite rosetone.co.uk
+/setsite example.com
+
+<b>Current Site:</b> <code>{}</code>""".format(stripe_sites[0] if stripe_sites else 'None')
+        safe_send_message(message.chat.id, msg)
+        return
+    
+    site = parts[1].strip().lower()
+    site = site.replace('http://', '').replace('https://', '')
+    
+    with sites_lock:
+        if site in stripe_sites:
+            stripe_sites.remove(site)
+            stripe_sites.insert(0, site)
+        else:
+            stripe_sites.insert(0, site)
+    
+    safe_send_message(
+        message.chat.id,
+        f"✅ <b>Active Site Updated!</b>\n\n<b>New Active Site:</b> <code>{site}</code>\n<b>Total Sites:</b> {len(stripe_sites)}"
+    )
+
+@bot.message_handler(commands=['site'])
+def manage_sites_command(message):
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can use this command!")
+        return
+    
+    with sites_lock:
+        current_sites = stripe_sites.copy()
+    
+    if not current_sites:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("➕ Add Site", callback_data="add_site_admin"))
+        safe_send_message(
+            message.chat.id,
+            "🌐 No sites configured. Click 'Add Site' to add one.",
+            reply_markup=markup,
+            reply_to_message_id=message.message_id
+        )
+        return
+    
+    for site in current_sites:
+        row = types.InlineKeyboardMarkup(row_width=2)
+        row.add(
+            types.InlineKeyboardButton(f"🌐 {site}", callback_data=f"view_site_{site}"),
+            types.InlineKeyboardButton("❌", callback_data=f"delete_site_{site}")
+        )
+        safe_send_message(
+            message.chat.id,
+            f"📡 Site: <code>{site}</code>",
+            reply_markup=row,
+            reply_to_message_id=message.message_id
+        )
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("➕ Add New Site", callback_data="add_site_admin"))
+    safe_send_message(
+        message.chat.id,
+        f"📊 Total Sites: {len(current_sites)}\nClick 'Add New Site' to add more.",
+        reply_markup=markup,
+        reply_to_message_id=message.message_id
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_site_'))
+def delete_site_callback(call):
+    if call.from_user.id not in OWNER_IDS:
+        bot.answer_callback_query(call.id, "❌ Only owner can do this!", show_alert=True)
+        return
+    
+    site = call.data.replace('delete_site_', '')
+    with sites_lock:
+        if site in stripe_sites:
+            stripe_sites.remove(site)
+            bot.answer_callback_query(call.id, f"✅ Site '{site}' deleted!")
+            safe_edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=f"❌ Site <code>{site}</code> has been deleted.",
+                parse_mode="HTML"
+            )
+        else:
+            bot.answer_callback_query(call.id, "❌ Site not found!", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'add_site_admin')
+def add_site_admin_callback(call):
+    if call.from_user.id not in OWNER_IDS:
+        bot.answer_callback_query(call.id, "❌ Only owner can do this!", show_alert=True)
+        return
+    
+    bot.answer_callback_query(call.id, "📝 Please send site URL")
+    msg = safe_send_message(
+        call.message.chat.id,
+        "📝 Send site URL to add:\nExample: <code>example.com</code>\n\nType /cancel to cancel."
+    )
+    bot.register_next_step_handler(msg, process_add_site_admin)
+
+def process_add_site_admin(message):
+    if message.from_user.id not in OWNER_IDS:
+        safe_send_message(message.chat.id, "❌ Only owner can do this!")
+        return
+    
+    if message.text.lower() == '/cancel':
+        safe_send_message(message.chat.id, "❌ Cancelled!")
+        return
+    
+    site = message.text.strip().lower().replace('http://', '').replace('https://', '')
+    
+    with sites_lock:
+        if site in stripe_sites:
+            safe_send_message(message.chat.id, f"⚠️ Site <code>{site}</code> already exists!")
+            return
+        stripe_sites.append(site)
+    
+    safe_send_message(
+        message.chat.id,
+        f"✅ Site <code>{site}</code> added successfully!\nTotal Sites: {len(stripe_sites)}"
+    )
+
+# ==================== WELCOME TEXT COMMAND ====================
+
 @bot.message_handler(commands=['setwelcome'])
 def set_welcome_command(message):
     if message.from_user.id not in OWNER_IDS:
@@ -908,41 +1266,8 @@ def set_welcome_command(message):
             welcome_text = new_text
             safe_send_message(message.chat.id, f"✅ Welcome text updated!\n\n{new_text}")
 
-# ==================== 🔥 COMMAND 2: SET ACTIVE SITE ====================
-@bot.message_handler(commands=['setsite'])
-def set_site_command(message):
-    if message.from_user.id not in OWNER_IDS:
-        safe_send_message(message.chat.id, "❌ Only owner can use this command!")
-        return
-    
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        msg = """❌ Usage: /setsite <site_domain>
+# ==================== GIF SET COMMAND ====================
 
-<b>Example:</b>
-/setsite rosetone.co.uk
-/setsite example.com
-
-<b>Current Site:</b> <code>{}</code>""".format(stripe_sites[0] if stripe_sites else 'None')
-        safe_send_message(message.chat.id, msg)
-        return
-    
-    site = parts[1].strip().lower()
-    site = site.replace('http://', '').replace('https://', '')
-    
-    with sites_lock:
-        if site in stripe_sites:
-            stripe_sites.remove(site)
-            stripe_sites.insert(0, site)
-        else:
-            stripe_sites.insert(0, site)
-    
-    safe_send_message(
-        message.chat.id,
-        f"✅ <b>Active Site Updated!</b>\n\n<b>New Active Site:</b> <code>{site}</code>\n<b>Total Sites:</b> {len(stripe_sites)}"
-    )
-
-# ==================== 🔥 COMMAND 3: SET GIF ====================
 @bot.message_handler(commands=['setgif'])
 def set_gif_command(message):
     if message.from_user.id not in OWNER_IDS:
@@ -1106,7 +1431,7 @@ def start_command(message):
 
 <b>🤖 Bot By: @OG_UNDEFINED</b>"""
     
-    # ✅ Send welcome GIF if set (with dynamic msg)
+    # ✅ Send welcome GIF if set
     with gif_lock:
         if welcome_gif_path and os.path.exists(welcome_gif_path):
             try:
@@ -1122,242 +1447,6 @@ def start_command(message):
                 print(f"Error sending welcome GIF: {e}")
     
     safe_send_message(message.chat.id, msg)
-
-# ==================== 🔥 FIXED PROXY COMMANDS ====================
-
-@bot.message_handler(commands=['addproxy'])
-def add_proxy_command(message):
-    if not check_free_user_access(message):
-        return
-    if not check_group_authorization(message):
-        return
-    
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        safe_send_message(
-            message.chat.id,
-            """❌ Usage: /addproxy <proxy>
-
-<b>Proxy Formats:</b>
-• <code>http://user:pass@ip:port</code>
-• <code>socks5://user:pass@ip:port</code>
-• <code>http://ip:port</code>
-
-<b>Example:</b>
-• /addproxy http://admin:123@1.2.3.4:8080
-• /addproxy socks5://user:pass@5.6.7.8:1080
-
-<b>Commands:</b>
-• /listproxy - List all your proxies
-• /removeproxy <proxy> - Remove a proxy""",
-            reply_to_message_id=message.message_id
-        )
-        return
-    
-    proxy = parts[1].strip()
-    success, msg = add_proxy_for_user(message.from_user.id, proxy)
-    safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
-
-@bot.message_handler(commands=['listproxy'])
-def list_proxy_command(message):
-    if not check_free_user_access(message):
-        return
-    if not check_group_authorization(message):
-        return
-    
-    user_id = message.from_user.id
-    proxies = list_proxies_for_user(user_id)
-    
-    if not proxies:
-        safe_send_message(
-            message.chat.id,
-            "❌ No proxies added. Use /addproxy to add one.",
-            reply_to_message_id=message.message_id
-        )
-        return
-    
-    # Create inline keyboard for each proxy with remove button
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for proxy in proxies:
-        # Shorten proxy for display
-        display_proxy = proxy[:30] + "..." if len(proxy) > 30 else proxy
-        markup.add(
-            types.InlineKeyboardButton(
-                f"❌ {display_proxy}", 
-                callback_data=f"removeproxy_{proxy}"
-            )
-        )
-    
-    safe_send_message(
-        message.chat.id,
-        f"📋 <b>Your Proxies ({len(proxies)})</b>\n\nClick ❌ to remove a proxy.",
-        reply_markup=markup,
-        reply_to_message_id=message.message_id
-    )
-
-@bot.message_handler(commands=['removeproxy'])
-def remove_proxy_command(message):
-    if not check_free_user_access(message):
-        return
-    if not check_group_authorization(message):
-        return
-    
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        safe_send_message(
-            message.chat.id,
-            "❌ Usage: /removeproxy <proxy>\nExample: /removeproxy http://1.2.3.4:8080\n\nOr use /listproxy to see and remove proxies.",
-            reply_to_message_id=message.message_id
-        )
-        return
-    
-    proxy = parts[1].strip()
-    success, msg = remove_proxy_for_user(message.from_user.id, proxy)
-    safe_send_message(message.chat.id, msg, reply_to_message_id=message.message_id)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('removeproxy_'))
-def remove_proxy_callback(call):
-    """Remove proxy via inline button"""
-    user_id = call.from_user.id
-    
-    # Extract proxy from callback data
-    proxy = call.data.replace('removeproxy_', '')
-    
-    success, msg = remove_proxy_for_user(user_id, proxy)
-    
-    if success:
-        bot.answer_callback_query(call.id, "✅ Proxy removed!")
-    else:
-        bot.answer_callback_query(call.id, "❌ Failed to remove!")
-    
-    # Refresh the list
-    proxies = list_proxies_for_user(user_id)
-    
-    if not proxies:
-        safe_edit_message_text(
-            "❌ No proxies added. Use /addproxy to add one.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id
-        )
-        return
-    
-    # Rebuild the list
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for p in proxies:
-        display_proxy = p[:30] + "..." if len(p) > 30 else p
-        markup.add(
-            types.InlineKeyboardButton(
-                f"❌ {display_proxy}", 
-                callback_data=f"removeproxy_{p}"
-            )
-        )
-    
-    safe_edit_message_text(
-        f"📋 <b>Your Proxies ({len(proxies)})</b>\n\nClick ❌ to remove a proxy.",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        reply_markup=markup,
-        parse_mode="HTML"
-    )
-
-# ==================== SITE MANAGEMENT COMMANDS ====================
-
-@bot.message_handler(commands=['site'])
-def manage_sites_command(message):
-    if message.from_user.id not in OWNER_IDS:
-        safe_send_message(message.chat.id, "❌ Only owner can use this command!")
-        return
-    
-    with sites_lock:
-        current_sites = stripe_sites.copy()
-    
-    if not current_sites:
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("➕ Add Site", callback_data="add_site_admin"))
-        safe_send_message(
-            message.chat.id,
-            "🌐 No sites configured. Click 'Add Site' to add one.",
-            reply_markup=markup,
-            reply_to_message_id=message.message_id
-        )
-        return
-    
-    for site in current_sites:
-        row = types.InlineKeyboardMarkup(row_width=2)
-        row.add(
-            types.InlineKeyboardButton(f"🌐 {site}", callback_data=f"view_site_{site}"),
-            types.InlineKeyboardButton("❌", callback_data=f"delete_site_{site}")
-        )
-        safe_send_message(
-            message.chat.id,
-            f"📡 Site: <code>{site}</code>",
-            reply_markup=row,
-            reply_to_message_id=message.message_id
-        )
-    
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("➕ Add New Site", callback_data="add_site_admin"))
-    safe_send_message(
-        message.chat.id,
-        f"📊 Total Sites: {len(current_sites)}\nClick 'Add New Site' to add more.",
-        reply_markup=markup,
-        reply_to_message_id=message.message_id
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_site_'))
-def delete_site_callback(call):
-    if call.from_user.id not in OWNER_IDS:
-        bot.answer_callback_query(call.id, "❌ Only owner can do this!", show_alert=True)
-        return
-    
-    site = call.data.replace('delete_site_', '')
-    with sites_lock:
-        if site in stripe_sites:
-            stripe_sites.remove(site)
-            bot.answer_callback_query(call.id, f"✅ Site '{site}' deleted!")
-            safe_edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=f"❌ Site <code>{site}</code> has been deleted.",
-                parse_mode="HTML"
-            )
-        else:
-            bot.answer_callback_query(call.id, "❌ Site not found!", show_alert=True)
-
-@bot.callback_query_handler(func=lambda call: call.data == 'add_site_admin')
-def add_site_admin_callback(call):
-    if call.from_user.id not in OWNER_IDS:
-        bot.answer_callback_query(call.id, "❌ Only owner can do this!", show_alert=True)
-        return
-    
-    bot.answer_callback_query(call.id, "📝 Please send site URL")
-    msg = safe_send_message(
-        call.message.chat.id,
-        "📝 Send site URL to add:\nExample: <code>example.com</code>\n\nType /cancel to cancel."
-    )
-    bot.register_next_step_handler(msg, process_add_site_admin)
-
-def process_add_site_admin(message):
-    if message.from_user.id not in OWNER_IDS:
-        safe_send_message(message.chat.id, "❌ Only owner can do this!")
-        return
-    
-    if message.text.lower() == '/cancel':
-        safe_send_message(message.chat.id, "❌ Cancelled!")
-        return
-    
-    site = message.text.strip().lower().replace('http://', '').replace('https://', '')
-    
-    with sites_lock:
-        if site in stripe_sites:
-            safe_send_message(message.chat.id, f"⚠️ Site <code>{site}</code> already exists!")
-            return
-        stripe_sites.append(site)
-    
-    safe_send_message(
-        message.chat.id,
-        f"✅ Site <code>{site}</code> added successfully!\nTotal Sites: {len(stripe_sites)}"
-    )
 
 # ==================== CHK, MASS, MTXT COMMANDS ====================
 
@@ -1718,7 +1807,7 @@ def stop_callback(call):
         print(f"Error in stop_callback: {e}")
         bot.answer_callback_query(call.id, "❌ Error stopping check!", show_alert=True)
 
-# ==================== PREMIUM MANAGEMENT ====================
+# ==================== PREMIUM MANAGEMENT COMMANDS ====================
 
 @bot.message_handler(commands=['addpremium'])
 def add_premium_command(message):
@@ -2666,6 +2755,7 @@ def help_command(message):
 • /listproxy - List your proxies
 • /removeproxy <proxy> - Remove proxy
 • Proxies rotate automatically per card check
+• 🔥 Only LIVE proxies are accepted!
 
 <b>📝 Welcome Text:</b>
 • /setwelcome <text> - Set custom welcome text (admin)
@@ -2736,6 +2826,7 @@ print(f"📡 SITE MANAGEMENT ADDED: /site command with buttons")
 print(f"📝 WELCOME TEXT SYSTEM ADDED: Admin can change welcome text with /setwelcome")
 print(f"🌐 ACTIVE SITE COMMAND ADDED: Admin can change active site with /setsite")
 print(f"✅ /listproxy and /removeproxy FIXED: Now working with inline buttons")
+print(f"🔥 PROXY VALIDATION ADDED: Only LIVE proxies are accepted (HTTP/HTTPS/SOCKS4/SOCKS5)")
 print(f"🔥 ALL YOUR ORIGINAL FEATURES PRESERVED 100%")
 
 bot.infinity_polling(timeout=30, long_polling_timeout=30)
