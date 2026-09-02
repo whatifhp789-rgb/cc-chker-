@@ -4655,7 +4655,7 @@ async def run_dump_checking(event, session_id, session, local_sites):
     batch_size = 25
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=100)) as session_obj:
         for i in range(0, len(cards), batch_size):
-        if not session['is_active']:
+            if not session['is_active']:
             break
         if not local_sites:
             await status_msg.edit("❌ **All sites are dead!**\nPlease add fresh sites and try again.")
